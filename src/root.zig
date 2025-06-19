@@ -16,7 +16,12 @@ const KakSession = struct {
     }
 };
 
-pub fn selectSession(allocator: std.mem.Allocator, sessions: []KakSession) !?KakSession {
+const KakSessionOrName = union(enum) {
+    session: KakSession,
+    name: []const u8,
+};
+
+pub fn selectSession(allocator: std.mem.Allocator, sessions: []KakSession) !KakSessionOrName {
     var fzf_input = std.ArrayList([]const u8).init(allocator);
     var mapping = std.StringHashMap(KakSession).init(allocator);
     for (sessions) |session| {
@@ -25,35 +30,67 @@ pub fn selectSession(allocator: std.mem.Allocator, sessions: []KakSession) !?Kak
         try mapping.put(line, session);
     }
 
-    var fzf = std.process.Child.init(&[_][]const u8{"fzf"}, allocator);
+    var fzf = std.process.Child.init(&[_][]const u8{
+        "fzf",
+        "--expect=enter",
+        "--expect=space",
+        "--print-query",
+    }, allocator);
     fzf.stdout_behavior = .Pipe;
     fzf.stdin_behavior = .Pipe;
     try fzf.spawn();
     const stdin = fzf.stdin.?;
     const stdout = fzf.stdout.?;
+    const reader = stdout.reader();
 
     for (fzf_input.items) |line| {
         try stdin.writeAll(line);
         try stdin.writeAll("\n");
     }
-    const selection = try stdout.readToEndAlloc(allocator, 1024);
-    if (selection.len == 0) exit(0);
-    const chomped_selection = selection[0 .. selection.len - 1];
-    _ = try fzf.wait();
-    return mapping.get(chomped_selection);
+    const query_line = try reader.readUntilDelimiterOrEofAlloc(allocator, '\n', 1024);
+    // key line
+    _ = try reader.readUntilDelimiterOrEofAlloc(allocator, '\n', 1024);
+    const match_line = try reader.readUntilDelimiterOrEofAlloc(allocator, '\n', 1024);
+
+    // Handle result
+    const term = try fzf.wait();
+    if (term.Exited == 130) {
+        exit(0); // user quit
+    } else if (term.Exited == 1) {
+        // off-list selection
+        if (query_line) |line| return .{ .name = line };
+    } else if (match_line) |line| {
+        if (mapping.get(line)) |session| {
+            return .{ .session = session };
+        } else {
+            return .{ .name = line };
+        }
+    }
+    return .{ .name = "" };
 }
 
-pub fn execKak(allocator: std.mem.Allocator, session: ?KakSession) !void {
-    if (session) |s| {
-        const envp = try std.process.getEnvMap(allocator);
-        const kak_args = &[_][]const u8{
-            "kak",
-            "-c",
-            s.name,
-        };
-        return std.process.execve(allocator, kak_args, &envp);
-    } else {
-        fatal("oh no! no session provided\n", .{});
+pub fn execKak(allocator: std.mem.Allocator, session_or_name: KakSessionOrName) !void {
+    const envp = try std.process.getEnvMap(allocator);
+    switch (session_or_name) {
+        .session => |session| {
+            const kak_args = &[_][]const u8{
+                "kak",
+                "-c",
+                session.name,
+            };
+            return std.process.execve(allocator, kak_args, &envp);
+        },
+        .name => |name| {
+            const kak_args = if (name.len == 0)
+                &[_][]const u8{"kak"}
+            else
+                &[_][]const u8{
+                    "kak",
+                    "-s",
+                    name,
+                };
+            return std.process.execve(allocator, kak_args, &envp);
+        },
     }
 }
 
