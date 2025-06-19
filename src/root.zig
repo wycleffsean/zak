@@ -1,12 +1,6 @@
 const std = @import("std");
 const fatal = std.process.fatal;
-
-// const mkfifo = @extern(fn (path: [*:0]const u8, mode: u32) callconv(.C) c_int);
-
-const c = @cImport({
-    @cInclude("sys/types.h");
-    @cInclude("sys/stat.h");
-});
+const exit = std.process.exit;
 
 const KakSession = struct {
     name: []const u8,
@@ -43,6 +37,7 @@ pub fn selectSession(allocator: std.mem.Allocator, sessions: []KakSession) !?Kak
         try stdin.writeAll("\n");
     }
     const selection = try stdout.readToEndAlloc(allocator, 1024);
+    if (selection.len == 0) exit(0);
     const chomped_selection = selection[0 .. selection.len - 1];
     _ = try fzf.wait();
     return mapping.get(chomped_selection);
@@ -58,7 +53,7 @@ pub fn execKak(allocator: std.mem.Allocator, session: ?KakSession) !void {
         };
         return std.process.execve(allocator, kak_args, &envp);
     } else {
-        std.debug.print("oh no! no session provided\n", .{});
+        fatal("oh no! no session provided\n", .{});
     }
 }
 
@@ -90,9 +85,7 @@ pub fn kakSessionPath(allocator: std.mem.Allocator) ![]const u8 {
 }
 
 pub fn kakSessions(allocator: std.mem.Allocator) ![]KakSession {
-    // var sessions_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
     const sessions_path = try kakSessionPath(allocator);
-    std.debug.print("{s}\n", .{sessions_path});
     defer allocator.free(sessions_path);
 
     var dir = std.fs.openDirAbsolute(sessions_path, .{ .iterate = true }) catch |e| {
