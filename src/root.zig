@@ -1,4 +1,5 @@
 const std = @import("std");
+const fatal = std.process.fatal;
 
 // const mkfifo = @extern(fn (path: [*:0]const u8, mode: u32) callconv(.C) c_int);
 
@@ -61,23 +62,46 @@ pub fn execKak(allocator: std.mem.Allocator, session: ?KakSession) !void {
     }
 }
 
-pub fn kakSessions(allocator: std.mem.Allocator) ![]KakSession {
-    // var sessions_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var sessions_path: []const u8 = undefined;
-    const xdg = try std.process.getEnvVarOwned(allocator, "XDG_RUNTIME_DIR");
-    defer allocator.free(xdg);
-
-    if (xdg.len > 0) {
-        sessions_path = std.fs.path.join(allocator, &.{ xdg, "kakoune" }) catch unreachable;
-    } else {
-        sessions_path = "/tmp/kakoune";
+pub fn kakSessionPath(allocator: std.mem.Allocator) ![]const u8 {
+    // 1. Try $XDG_RUNTIME_DIR/kakoune
+    if (std.process.getEnvVarOwned(allocator, "XDG_RUNTIME_DIR")) |xdg| {
+        defer allocator.free(xdg);
+        return std.fs.path.join(allocator, &.{ xdg, "kakoune" });
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => {},
+        else => return err,
     }
 
-    const parent_dir = if (xdg.len > 0) xdg else "/tmp";
-    sessions_path = try std.fs.path.join(allocator, &.{ parent_dir, "kakoune" });
+    // 2. Try $TMPDIR/kakoune-$USER
+    const tmpdir = std.process.getEnvVarOwned(allocator, "TMPDIR") catch null;
+    defer if (tmpdir) |t| allocator.free(t);
+    const tmp = tmpdir orelse "/tmp";
+
+    const user = std.process.getEnvVarOwned(allocator, "USER") catch null;
+    defer if (user) |u| allocator.free(u);
+
+    if (user) |username| {
+        const tmp_user = try std.fmt.allocPrint(allocator, "{s}/kakoune-{s}", .{ tmp, username });
+        return tmp_user;
+    }
+
+    // 3. Fallback to /tmp/kakoune
+    return std.fs.path.join(allocator, &.{ "/tmp", "kakoune" });
+}
+
+pub fn kakSessions(allocator: std.mem.Allocator) ![]KakSession {
+    // var sessions_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const sessions_path = try kakSessionPath(allocator);
+    std.debug.print("{s}\n", .{sessions_path});
     defer allocator.free(sessions_path);
 
-    var dir = try std.fs.openDirAbsolute(sessions_path, .{ .iterate = true });
+    var dir = std.fs.openDirAbsolute(sessions_path, .{ .iterate = true }) catch |e| {
+        switch (e) {
+            error.FileNotFound => fatal("kakoune sessions not found in search path: {s}", .{sessions_path}),
+            error.NotDir => fatal("kakoune sessions search path is not a directory: {s}", .{sessions_path}),
+            else => return e,
+        }
+    };
     defer dir.close();
 
     var sessions = std.ArrayList(KakSession).init(allocator);
